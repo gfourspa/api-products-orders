@@ -1,98 +1,272 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# api-adm-pedidos-productos
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+REST API for managing businesses, product catalogs, and customer orders. Built with NestJS 11 and PostgreSQL.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+**Base URL:** `https://api-products-orders.onrender.com/api/v1`  
+**Swagger UI:** `https://api-products-orders.onrender.com/api/docs`
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Tech Stack
 
-## Project setup
+| Layer | Technology |
+|---|---|
+| Framework | NestJS 11 (TypeScript) |
+| Database | PostgreSQL + TypeORM |
+| Authentication | Passport JWT (access + refresh tokens) |
+| Image storage | Cloudinary |
+| Email notifications | NodeMailer + Handlebars templates |
+| SMS / WhatsApp | Twilio |
+| Logging | nestjs-pino (structured JSON logs) |
+| i18n | nestjs-i18n (Spanish / English) |
+| Validation | class-validator + Joi (env schema) |
+| Rate limiting | @nestjs/throttler |
+| API docs | Swagger (@nestjs/swagger) |
 
-```bash
-$ npm install
+---
+
+## Modules
+
+| Module | Description |
+|---|---|
+| `auth` | Login, logout, JWT refresh, role-based guards, **password recovery** |
+| `users` | User management (admins per business) |
+| `business` | Business/tenant registration and management |
+| `categories` | Product categories with i18n translations |
+| `products` | Product catalog with images (Cloudinary) and stock |
+| `orders` | Customer order creation, admin manual entry, status management |
+| `notifications` | Async email / WhatsApp / SMS notification log |
+
+---
+
+## Roles
+
+| Role | Access |
+|---|---|
+| `super_admin` | Full access to all resources |
+| `admin` | Manages their own business, products, and orders |
+
+---
+
+## Order Sources
+
+| Source | Endpoint | Auth | Admin notification |
+|---|---|---|---|
+| `customer` | `POST /orders` | None (public) | ✅ Sent |
+| `admin` | `POST /orders/admin` | JWT required | ✗ Not sent |
+
+Admin-created orders are intended for walk-in or phone sales entered manually by the admin. They follow the same stock validation and decrement logic as customer orders but skip the "new order" admin notification.
+
+---
+
+## Order Status Flow
+
+```
+pending → confirmed → ready → delivered
+    \                            /
+     --------> cancelled <------
 ```
 
-## Compile and run the project
+| Status | Customer notification |
+|---|---|
+| `pending` | — |
+| `confirmed` | ✅ Email sent |
+| `ready` | ✅ Email sent |
+| `delivered` | — |
+| `cancelled` | — |
+
+Order creation (`POST /orders`) is a **public endpoint** — no authentication required. Notifications are sent asynchronously and do not block the response.
+
+---
+
+## Password Recovery
+
+| Step | Endpoint | Notes |
+|---|---|---|
+| 1. Request reset | `POST /auth/forgot-password` | Rate-limited 3 req/min. Always returns `200` — email sent async only if address is registered (prevents user enumeration). |
+| 2. Reset | `POST /auth/reset-password` | Token valid for **1 hour**, single-use. Revokes all existing sessions on success. |
+
+The reset link sent by email uses `FRONTEND_URL` (or `APP_URL` if not set) as the base: `{FRONTEND_URL}/reset-password?token=<token>`.
+
+---
+
+## Login Error Messages
+
+Distinct error messages for each case:
+- **Email not registered** → `401 auth.email_not_found`
+- **Wrong password** → `401 auth.invalid_password`
+
+> Timing-attack protection is preserved — bcrypt runs regardless of whether the user exists.
+
+---
+
+## Sales Export (PDF)
+
+`GET /orders/export/pdf` — requires JWT, accessible to both `admin` and `super_admin`.
+
+| Role | businessId param |
+|---|---|
+| `admin` | Auto-filled from JWT token |
+| `super_admin` | Must provide `?businessId=<uuid>` |
+
+**Query params:**
+- `date` — ISO date (`YYYY-MM-DD`). Defaults to **today** when no date params are provided.
+- `startDate` / `endDate` — Date range. When provided, `date` is ignored.
+
+Returns a PDF file (`ventas-YYYY-MM-DD.pdf` or `ventas-startDate_endDate.pdf`) containing:
+- Business name and report date header
+- Table of all orders for that date: customer, products, status, total
+- Footer: total order count + grand revenue total
+
+---
+
+## Project Setup
+
+```bash
+npm install
+```
+
+### Environment variables
+
+Copy `.env.example` to `.env` and fill in the required values:
+
+```env
+# App
+PORT=3000
+NODE_ENV=development
+APP_URL=http://localhost:3000
+FRONTEND_URL=http://localhost:5173
+
+# Database
+DB_HOST=
+DB_PORT=5432
+DB_USER=
+DB_PASSWORD=
+DB_NAME=
+DB_SSL=false
+DB_SYNC=false
+
+# JWT
+JWT_ACCESS_SECRET=
+JWT_ACCESS_EXPIRES_IN=8h
+JWT_REFRESH_SECRET=
+JWT_REFRESH_EXPIRES_IN=7d
+
+# Cloudinary
+CLOUDINARY_CLOUD_NAME=
+CLOUDINARY_API_KEY=
+CLOUDINARY_API_SECRET=
+
+# Mail
+MAIL_HOST=
+MAIL_PORT=587
+MAIL_USER=
+MAIL_PASSWORD=
+MAIL_FROM=
+
+# Twilio (optional)
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
+
+# i18n
+DEFAULT_LANGUAGE=es
+
+# Seed
+SEED_SUPER_ADMIN_EMAIL=
+SEED_SUPER_ADMIN_PASSWORD=
+SEED_SUPER_ADMIN_NAME=
+```
+
+### Seed super admin
+
+```bash
+npm run seed
+```
+
+---
+
+## Running the App
 
 ```bash
 # development
-$ npm run start
+npm run start
 
 # watch mode
-$ npm run start:dev
+npm run start:dev
 
-# production mode
-$ npm run start:prod
+# production
+npm run start:prod
 ```
 
-## Run tests
+---
+
+## Tests
 
 ```bash
 # unit tests
-$ npm run test
+npm run test
 
 # e2e tests
-$ npm run test:e2e
+npm run test:e2e
 
-# test coverage
-$ npm run test:cov
+# coverage
+npm run test:cov
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## API Response Format
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+All responses follow a consistent envelope:
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+```json
+{
+  "data": <payload>,
+  "statusCode": 200
+}
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Paginated endpoints also include:
 
-## Resources
+```json
+{
+  "data": [...],
+  "meta": { "page": 1, "limit": 10, "total": 42, "lastPage": 5 },
+  "statusCode": 200
+}
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+Errors:
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```json
+{
+  "statusCode": 400,
+  "message": "Description of the error"
+}
+```
 
-## Support
+---
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Project Structure
 
-## Stay in touch
+```
+src/
+├── auth/           # JWT auth, guards, strategies, decorators
+├── business/       # Business/tenant management
+├── categories/     # Categories with i18n translations
+├── products/       # Product catalog, image upload
+├── orders/         # Order creation and status updates
+├── notifications/  # Email/WhatsApp/SMS async notifications
+├── users/          # User management
+├── common/         # Enums, filters, interceptors
+├── config/         # Database, Cloudinary, mail, env validation
+├── database/       # Seeds
+└── i18n/           # Translation files (es / en)
+```
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+---
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+UNLICENSED — private project.

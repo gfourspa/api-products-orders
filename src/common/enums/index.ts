@@ -26,3 +26,8 @@ export enum NotificationStatus {
   SENT = 'sent',
   FAILED = 'failed',
 }
+
+export enum OrderSource {
+  CUSTOMER = 'customer',
+  ADMIN = 'admin',
+}

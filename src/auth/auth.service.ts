@@ -1,4 +1,5 @@
 import {
+    BadRequestException,
     Injectable,
     NotFoundException,
     OnModuleInit,
@@ -8,11 +9,16 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcrypt';
+import { randomBytes } from 'crypto';
 import { I18nService } from 'nestjs-i18n';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
-import { IsNull, Repository } from 'typeorm';
+import { IsNull, MoreThan, Repository } from 'typeorm';
+import { NotificationsService } from '../notifications/notifications.service';
 import { User } from '../users/entities/user.entity';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { PasswordResetToken } from './entities/password-reset-token.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 
 interface JwtPayload {
@@ -34,9 +40,12 @@ export class AuthService implements OnModuleInit {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(RefreshToken)
     private readonly refreshTokensRepository: Repository<RefreshToken>,
+    @InjectRepository(PasswordResetToken)
+    private readonly passwordResetTokensRepository: Repository<PasswordResetToken>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly i18n: I18nService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async onModuleInit() {
@@ -53,17 +62,23 @@ export class AuthService implements OnModuleInit {
     const hashToCheck = user?.password ?? this.dummyHash;
     const isMatch = await bcrypt.compare(dto.password, hashToCheck);
 
-    if (!user || !isMatch) {
+    if (!user) {
       this.logger.warn(
-        {
-          email: dto.email,
-          foundUser: Boolean(user),
-          requestContext: 'auth.login',
-        },
-        'Failed login attempt',
+        { email: dto.email, requestContext: 'auth.login' },
+        'Failed login attempt — email not found',
       );
       throw new UnauthorizedException(
-        await this.i18n.translate('auth.invalid_credentials', { lang }),
+        await this.i18n.translate('auth.email_not_found', { lang }),
+      );
+    }
+
+    if (!isMatch) {
+      this.logger.warn(
+        { email: dto.email, requestContext: 'auth.login' },
+        'Failed login attempt — invalid password',
+      );
+      throw new UnauthorizedException(
+        await this.i18n.translate('auth.invalid_password', { lang }),
       );
     }
 
@@ -164,6 +179,94 @@ export class AuthService implements OnModuleInit {
     }
 
     return { data: user };
+  }
+
+  async forgotPassword(dto: ForgotPasswordDto, lang: string) {
+    // Always return the same response to prevent email enumeration
+    const successMessage = await this.i18n.translate('auth.password_reset_sent', { lang });
+
+    const user = await this.usersRepository.findOne({
+      where: { email: dto.email },
+    });
+
+    if (!user || !user.isActive) {
+      return { data: null, message: successMessage };
+    }
+
+    // Invalidate any previous unused tokens for this user
+    await this.passwordResetTokensRepository.update(
+      { userId: user.id, usedAt: IsNull() },
+      { usedAt: new Date() },
+    );
+
+    // Generate a 256-bit entropy token — stored as-is (random, non-user-derived)
+    const rawToken = randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    const record = this.passwordResetTokensRepository.create({
+      userId: user.id,
+      token: rawToken,
+      expiresAt,
+      usedAt: null,
+    });
+    await this.passwordResetTokensRepository.save(record);
+
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL')?.split(',')[0]
+      ?? this.configService.get<string>('APP_URL', 'http://localhost:3000');
+    const resetUrl = `${frontendUrl}/reset-password?token=${rawToken}`;
+
+    setImmediate(() => {
+      this.notificationsService
+        .sendPasswordResetEmail(user.email, user.name, resetUrl)
+        .catch((err: unknown) => {
+          this.logger.error(
+            { userId: user.id, error: err instanceof Error ? err.message : String(err) },
+            'Failed to dispatch password reset email',
+          );
+        });
+    });
+
+    return { data: null, message: successMessage };
+  }
+
+  async resetPassword(dto: ResetPasswordDto, lang: string) {
+    const record = await this.passwordResetTokensRepository.findOne({
+      where: {
+        token: dto.token,
+        usedAt: IsNull(),
+        expiresAt: MoreThan(new Date()),
+      },
+    });
+
+    if (!record) {
+      throw new BadRequestException(
+        await this.i18n.translate('auth.password_reset_token_invalid', { lang }),
+      );
+    }
+
+    const user = await this.usersRepository.findOne({ where: { id: record.userId } });
+
+    if (!user || !user.isActive) {
+      throw new BadRequestException(
+        await this.i18n.translate('auth.password_reset_token_invalid', { lang }),
+      );
+    }
+
+    user.password = await bcrypt.hash(dto.newPassword, 12);
+    await this.usersRepository.save(user);
+
+    // Mark token as used and revoke all refresh tokens
+    record.usedAt = new Date();
+    await this.passwordResetTokensRepository.save(record);
+    await this.refreshTokensRepository.update(
+      { userId: user.id, revokedAt: IsNull() },
+      { revokedAt: new Date() },
+    );
+
+    return {
+      data: null,
+      message: await this.i18n.translate('auth.password_reset_success', { lang }),
+    };
   }
 
   private async generateTokens(user: User) {
