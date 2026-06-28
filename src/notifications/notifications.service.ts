@@ -7,9 +7,9 @@ import * as twilio from 'twilio';
 import { Repository } from 'typeorm';
 import { Business } from '../business/entities/business.entity';
 import {
-  Language,
-  NotificationStatus,
-  NotificationType,
+    Language,
+    NotificationStatus,
+    NotificationType,
 } from '../common/enums';
 import { Order } from '../orders/entities/order.entity';
 import { NotificationLog } from './entities/notification-log.entity';
@@ -77,6 +77,26 @@ export class NotificationsService {
         business.notificationWhatsapp,
         message,
         order,
+      );
+    }
+  }
+
+  async sendPasswordResetEmail(to: string, name: string, resetUrl: string): Promise<void> {
+    try {
+      await this.mailerService.sendMail({
+        to,
+        subject: 'Restablecer contraseña',
+        template: 'reset-password',
+        context: { name, resetUrl },
+      });
+      this.logger.info({ recipient: to }, 'Password reset email sent');
+    } catch (error) {
+      this.logger.error(
+        {
+          recipient: to,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to send password reset email',
       );
     }
   }

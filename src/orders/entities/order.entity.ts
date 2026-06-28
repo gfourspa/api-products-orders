@@ -8,7 +8,7 @@ import {
     UpdateDateColumn,
 } from 'typeorm';
 import { Business } from '../../business/entities/business.entity';
-import { Language, OrderStatus } from '../../common/enums';
+import { Language, OrderSource, OrderStatus } from '../../common/enums';
 import { OrderItem } from '../entities/order-item.entity';
 
 @Entity('orders')
@@ -43,6 +43,13 @@ export class Order {
 
   @Column({ type: 'enum', enum: Language, default: Language.ES })
   language!: Language;
+
+  @Column({
+    type: 'enum',
+    enum: OrderSource,
+    default: OrderSource.CUSTOMER,
+  })
+  source!: OrderSource;
 
   @ManyToOne(() => Business, { onDelete: 'CASCADE' })
   business!: Business;
